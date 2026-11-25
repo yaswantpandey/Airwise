@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
+  CalendarDays,
   Compass,
   FileText,
   Languages,
@@ -49,6 +50,10 @@ const TabLoadingFallback = () => (
   </div>
 );
 
+const HistoryView = dynamic(
+  () => import('./HistoryView').then((mod) => mod.HistoryView),
+  { loading: TabLoadingFallback }
+);
 const DailyPlanView = dynamic(
   () => import('./DailyPlanView').then((mod) => mod.DailyPlanView),
   { loading: TabLoadingFallback }
@@ -72,7 +77,7 @@ const HouseholdProfileModal = dynamic(
 
 const loadFirebase = () => import('@/lib/firebase');
 
-type TabKey = 'now' | 'plan' | 'assistant' | 'tracker' | 'community';
+type TabKey = 'now' | 'history' | 'plan' | 'assistant' | 'tracker' | 'community';
 
 const LS_PROFILE_KEY = 'airwise_profile_v1';
 const LS_LOGS_KEY = 'airwise_logs_v1';
@@ -470,6 +475,7 @@ export function AirWiseApp({ initialSnapshot }: AirWiseAppProps) {
 
   const navItems: { key: TabKey; label: string; icon: typeof Compass }[] = [
     { key: 'now', label: t.navNow, icon: Compass },
+    { key: 'history', label: t.navHistory, icon: CalendarDays },
     { key: 'plan', label: t.navPlan, icon: FileText },
     { key: 'assistant', label: t.navAssistant, icon: MessageSquare },
     { key: 'tracker', label: t.navTracker, icon: Activity },
@@ -668,6 +674,17 @@ export function AirWiseApp({ initialSnapshot }: AirWiseAppProps) {
                 />
               )}
 
+              {activeTab === 'history' && (
+                <HistoryView
+                  snapshot={snapshot}
+                  loading={loadingAqi}
+                  profile={profile}
+                  language={language}
+                  t={t}
+                  onRefresh={() => void fetchAqi({ city: snapshot.locationName })}
+                />
+              )}
+
               {activeTab === 'plan' && (
                 <DailyPlanView
                   plan={plan}
@@ -728,7 +745,7 @@ export function AirWiseApp({ initialSnapshot }: AirWiseAppProps) {
         {/* Compact Mobile Bottom Thumb Navigation (<= 7% viewport height) */}
         <nav
           aria-label="Mobile navigation"
-          className="fixed bottom-0 left-0 right-0 z-30 grid grid-cols-5 border-t border-slate-200 bg-white/95 backdrop-blur-xs md:hidden dark:border-slate-800 dark:bg-[#0B1117]/95"
+          className="fixed bottom-0 left-0 right-0 z-30 grid grid-cols-6 border-t border-slate-200 bg-white/95 backdrop-blur-xs md:hidden dark:border-slate-800 dark:bg-[#0B1117]/95"
         >
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -739,14 +756,14 @@ export function AirWiseApp({ initialSnapshot }: AirWiseAppProps) {
                 type="button"
                 onClick={() => setActiveTab(item.key)}
                 aria-current={active ? 'page' : undefined}
-                className={`flex min-h-[54px] flex-col items-center justify-center gap-0.5 text-[11px] font-medium ${
+                className={`flex min-h-[54px] flex-col items-center justify-center gap-0.5 px-0.5 text-[10px] font-medium ${
                   active
                     ? 'text-teal-800 dark:text-teal-300'
                     : 'text-slate-500 dark:text-slate-400'
                 }`}
               >
                 <Icon className="h-4 w-4" aria-hidden="true" />
-                <span className="truncate max-w-[68px]">{item.label}</span>
+                <span className="truncate max-w-[58px]">{item.label}</span>
               </button>
             );
           })}

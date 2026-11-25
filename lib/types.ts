@@ -34,6 +34,18 @@ export interface HourlyForecastPoint {
   windKmh: number;
 }
 
+export interface DailyHistoryPoint {
+  dateIso: string; // YYYY-MM-DD
+  dayLabel: string; // e.g. "Nov 19"
+  weekdayLabel: string; // e.g. "Thu"
+  avgAqi: number;
+  maxAqi: number;
+  minAqi: number;
+  avgPm25: number;
+  maxPm25: number;
+  whoExceedanceRatio: number; // avgPm25 / 15 (WHO 24h PM2.5 guideline)
+}
+
 export interface AirQualitySnapshot {
   locationName: string;
   region: string;
@@ -53,6 +65,7 @@ export interface AirQualitySnapshot {
   windKmh: number;
   inversionRisk: 'low' | 'moderate' | 'high';
   hourly: HourlyForecastPoint[];
+  history7d?: DailyHistoryPoint[];
 }
 
 export type CommuteMode =

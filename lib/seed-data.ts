@@ -3,10 +3,11 @@ import type {
   AirQualitySnapshot,
   CleanAirActionOption,
   CommunityGroupData,
+  DailyHistoryPoint,
   HourlyForecastPoint,
   HouseholdProfile,
 } from './types';
-import { computeInversionRisk } from './air-quality';
+import { computeInversionRisk, formatCalendarDateLabels } from './air-quality';
 
 export interface PresetCity {
   name: string;
@@ -216,7 +217,97 @@ export function buildSeedSnapshot(city: PresetCity): AirQualitySnapshot {
     windKmh: city.windKmh,
     inversionRisk: computeInversionRisk(city.basePm25, city.windKmh, city.humidityPct),
     hourly,
+    history7d: buildSeedHistory7d(city.baseAqi, city.basePm25),
   };
+}
+
+/**
+ * Generates a realistic 7-day air quality progression anchored to a city's baseline AQI & PM2.5
+ * (reflecting a smog episode easing slightly over the past 3 days) for instant SSR & offline fallback.
+ */
+export function buildSeedHistory7d(baseAqi: number, basePm25: number): DailyHistoryPoint[] {
+  const dailyFactors = [1.14, 1.22, 1.18, 1.09, 1.04, 0.96, 1.0];
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  return dailyFactors.map((factor, idx) => {
+    const daysAgo = dailyFactors.length - 1 - idx;
+    const dt = new Date(today.getTime() - daysAgo * 86_400_000);
+    const dateIso = dt.toISOString().slice(0, 10);
+    const { dayLabel, weekdayLabel } = formatCalendarDateLabels(dateIso);
+
+    const avgAqi = Math.max(15, Math.round(baseAqi * factor));
+    const maxAqi = Math.max(avgAqi + 12, Math.round(avgAqi * 1.24));
+    const minAqi = Math.max(10, Math.round(avgAqi * 0.72));
+    const avgPm25 = Math.max(3, Math.round(basePm25 * factor * 10) / 10);
+    const maxPm25 = Math.round(avgPm25 * 1.28 * 10) / 10;
+
+    return {
+      dateIso,
+      dayLabel,
+      weekdayLabel,
+      avgAqi,
+      maxAqi,
+      minAqi,
+      avgPm25,
+      maxPm25,
+      whoExceedanceRatio: Math.round((avgPm25 / 15) * 10) / 10,
+    };
+  });
+}
+
+/**
+ * Generates deterministic daily history across any [startDateIso, endDateIso] span (up to 90 days)
+ * so custom and 14d/30d ranges remain informative even offline or when upstream archive is unreachable.
+ */
+export function buildSeedHistoryRange(
+  baseAqi: number,
+  basePm25: number,
+  startDateIso: string,
+  endDateIso: string
+): DailyHistoryPoint[] {
+  const [sy, sm, sd] = startDateIso.split('-').map(Number);
+  const [ey, em, ed] = endDateIso.split('-').map(Number);
+  const startMs = Date.UTC(sy, sm - 1, sd);
+  const endMs = Date.UTC(ey, em - 1, ed);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs > endMs) {
+    return buildSeedHistory7d(baseAqi, basePm25);
+  }
+
+  const totalDays = Math.min(90, Math.round((endMs - startMs) / 86_400_000) + 1);
+  const points: DailyHistoryPoint[] = [];
+
+  for (let i = 0; i < totalDays; i++) {
+    const dt = new Date(startMs + i * 86_400_000);
+    const dateIso = dt.toISOString().slice(0, 10);
+    const { dayLabel, weekdayLabel } = formatCalendarDateLabels(dateIso);
+
+    // Smooth synoptic weather cycle + gentle recent easing
+    const progress = totalDays > 1 ? i / (totalDays - 1) : 1;
+    const wave = Math.sin(i * 0.85) * 0.14 + Math.cos(i * 0.35) * 0.08;
+    const trendFactor = 1.12 - progress * 0.14;
+    const factor = Math.max(0.55, Math.min(1.45, trendFactor + wave));
+
+    const avgAqi = Math.max(15, Math.round(baseAqi * factor));
+    const maxAqi = Math.max(avgAqi + 10, Math.round(avgAqi * 1.24));
+    const minAqi = Math.max(10, Math.round(avgAqi * 0.72));
+    const avgPm25 = Math.max(3, Math.round(basePm25 * factor * 10) / 10);
+    const maxPm25 = Math.round(avgPm25 * 1.28 * 10) / 10;
+
+    points.push({
+      dateIso,
+      dayLabel,
+      weekdayLabel,
+      avgAqi,
+      maxAqi,
+      minAqi,
+      avgPm25,
+      maxPm25,
+      whoExceedanceRatio: Math.round((avgPm25 / 15) * 10) / 10,
+    });
+  }
+
+  return points;
 }
 
 export const DEFAULT_HOUSEHOLD_PROFILE: HouseholdProfile = {

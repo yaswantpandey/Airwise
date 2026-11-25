@@ -2,6 +2,7 @@ import type { LanguageCode } from './types';
 
 export interface Translations {
   navNow: string;
+  navHistory: string;
   navPlan: string;
   navAssistant: string;
   navTracker: string;
@@ -67,10 +68,27 @@ export interface Translations {
   stepBack: string;
   stepNext: string;
   saveProfile: string;
+  historyTitle: string;
+  historySubtitle: string;
+  historyViewCombined: string;
+  historyViewAqi: string;
+  historyViewPm25: string;
+  historyAvgAqiLabel: string;
+  historyAvgPm25Label: string;
+  historyCleanestDayLabel: string;
+  historySafeDaysLabel: string;
+  historyBreakdownTitle: string;
+  historyRange7d: string;
+  historyRange14d: string;
+  historyRange30d: string;
+  historyFromLabel: string;
+  historyToLabel: string;
+  historyApplyRange: string;
 }
 
 const EN: Translations = {
   navNow: 'Now',
+  navHistory: 'History',
   navPlan: 'Daily Plan',
   navAssistant: 'Assistant',
   navTracker: 'Impact',
@@ -141,10 +159,27 @@ const EN: Translations = {
   stepBack: 'Back',
   stepNext: 'Continue',
   saveProfile: 'Save Household Profile',
+  historyTitle: 'Air Quality History',
+  historySubtitle: 'Track daily PM2.5 and US AQI trends across 7, 14, 30 days, or any custom date range.',
+  historyViewCombined: 'AQI + PM2.5',
+  historyViewAqi: 'AQI Trend',
+  historyViewPm25: 'PM2.5 Trend',
+  historyAvgAqiLabel: 'Avg AQI',
+  historyAvgPm25Label: 'Avg PM2.5',
+  historyCleanestDayLabel: 'Cleanest Day',
+  historySafeDaysLabel: 'Within Personal Limit',
+  historyBreakdownTitle: 'Daily Air Quality Breakdown',
+  historyRange7d: '7 Days',
+  historyRange14d: '14 Days',
+  historyRange30d: '30 Days',
+  historyFromLabel: 'From',
+  historyToLabel: 'To',
+  historyApplyRange: 'Apply',
 };
 
 const HI: Translations = {
   navNow: 'अभी',
+  navHistory: 'इतिहास',
   navPlan: 'दैनिक योजना',
   navAssistant: 'सहायक',
   navTracker: 'प्रभाव',
@@ -215,6 +250,22 @@ const HI: Translations = {
   stepBack: 'पीछे',
   stepNext: 'आगे बढ़ें',
   saveProfile: 'प्रोफ़ाइल सहेजें',
+  historyTitle: 'वायु गुणवत्ता इतिहास',
+  historySubtitle: '7, 14, 30 दिन या किसी भी कस्टम अवधि में दैनिक PM2.5 और US AQI रुझान ट्रैक करें।',
+  historyViewCombined: 'AQI + PM2.5',
+  historyViewAqi: 'AQI रुझान',
+  historyViewPm25: 'PM2.5 रुझान',
+  historyAvgAqiLabel: 'औसत AQI',
+  historyAvgPm25Label: 'औसत PM2.5',
+  historyCleanestDayLabel: 'सबसे स्वच्छ दिन',
+  historySafeDaysLabel: 'व्यक्तिगत सीमा के भीतर',
+  historyBreakdownTitle: 'दैनिक वायु गुणवत्ता विवरण',
+  historyRange7d: '7 दिन',
+  historyRange14d: '14 दिन',
+  historyRange30d: '30 दिन',
+  historyFromLabel: 'से',
+  historyToLabel: 'तक',
+  historyApplyRange: 'लागू करें',
 };
 
 export function getTranslations(lang: LanguageCode): Translations {

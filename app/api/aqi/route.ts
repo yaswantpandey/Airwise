@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
-import { computeInversionRisk, sanitizeUserText } from '@/lib/air-quality';
+import {
+  aggregateHourlyToDailyHistory,
+  computeInversionRisk,
+  sanitizeUserText,
+} from '@/lib/air-quality';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
-import { buildSeedSnapshot, PRESET_CITIES } from '@/lib/seed-data';
+import { buildSeedHistory7d, buildSeedSnapshot, PRESET_CITIES } from '@/lib/seed-data';
 import type { AirQualitySnapshot, HourlyForecastPoint } from '@/lib/types';
 
 interface CacheEntry {
@@ -142,8 +146,8 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 2. Fetch live Open-Meteo Air Quality & Weather forecasts in parallel
-    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone,carbon_monoxide&hourly=us_aqi,pm2_5,pm10&forecast_days=2&timezone=auto`;
+    // 2. Fetch live Open-Meteo Air Quality (past 7 days + next 2 days) & Weather forecasts in parallel
+    const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone,carbon_monoxide&hourly=us_aqi,pm2_5,pm10&past_days=7&forecast_days=2&timezone=auto`;
     const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&forecast_days=2&timezone=auto`;
 
     const [aqRes, wxRes] = await Promise.all([
@@ -187,25 +191,45 @@ export async function GET(request: NextRequest) {
       ? wxJson.hourly.wind_speed_10m
       : [];
 
+    const wxTimes: string[] = Array.isArray(wxJson?.hourly?.time) ? wxJson.hourly.time : [];
+    const wxIndexByTime = new Map<string, number>();
+    for (let i = 0; i < wxTimes.length; i++) {
+      wxIndexByTime.set(wxTimes[i], i);
+    }
+
     const nowMs = Date.now();
     let startIdx = times.findIndex((t) => new Date(t).getTime() >= nowMs - 3600_000);
-    if (startIdx < 0) startIdx = 0;
+    if (startIdx < 0) startIdx = Math.max(0, times.length - 48);
 
     const hourly: HourlyForecastPoint[] = [];
     for (let i = startIdx; i < Math.min(times.length, startIdx + 48); i++) {
       const tStr = times[i];
       const label = tStr.includes('T') ? tStr.split('T')[1].slice(0, 5) : tStr;
+      const wxIdx = wxIndexByTime.get(tStr);
       hourly.push({
         timeIso: tStr,
         hourLabel: label,
         aqi: Math.max(0, Math.round(Number(hAqi[i] ?? aqi))),
         pm25: Math.round(Number(hPm25[i] ?? pm25) * 10) / 10,
         pm10: Math.round(Number(hPm10[i] ?? pm10) * 10) / 10,
-        temperatureC: Math.round(Number(hTemp[i] ?? temperatureC) * 10) / 10,
-        humidityPct: Math.round(Number(hHum[i] ?? humidityPct)),
-        windKmh: Math.round(Number(hWind[i] ?? windKmh) * 10) / 10,
+        temperatureC:
+          wxIdx !== undefined
+            ? Math.round(Number(hTemp[wxIdx] ?? temperatureC) * 10) / 10
+            : temperatureC,
+        humidityPct:
+          wxIdx !== undefined ? Math.round(Number(hHum[wxIdx] ?? humidityPct)) : humidityPct,
+        windKmh:
+          wxIdx !== undefined ? Math.round(Number(hWind[wxIdx] ?? windKmh) * 10) / 10 : windKmh,
       });
     }
+
+    const currentDateIso =
+      typeof curAq.time === 'string' && curAq.time.length >= 10
+        ? curAq.time.slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+    const parsedHistory = aggregateHourlyToDailyHistory(times, hAqi, hPm25, currentDateIso);
+    const history7d =
+      parsedHistory.length >= 2 ? parsedHistory : buildSeedHistory7d(aqi || 120, pm25 || 45);
 
     const snapshot: AirQualitySnapshot = {
       locationName,
@@ -226,6 +250,7 @@ export async function GET(request: NextRequest) {
       windKmh,
       inversionRisk: computeInversionRisk(pm25, windKmh, humidityPct),
       hourly,
+      history7d,
     };
 
     aqiCache.set(cacheKey, { data: snapshot, expiresAt: Date.now() + CACHE_TTL_MS });
