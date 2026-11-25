@@ -1,0 +1,6 @@
+{
+  "name": "AirWise — Urban Air Quality Assistant",
+  "description": "GenAI-powered urban air quality assistant turning live AQI and winter smog forecasts into personalized, explainable family guidance, indoor air hacks, impact tracking, and community clean-air action.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

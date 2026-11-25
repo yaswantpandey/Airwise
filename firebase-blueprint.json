@@ -1,0 +1,319 @@
+{
+  "entities": {
+    "HouseholdProfile": {
+      "title": "HouseholdProfile",
+      "description": "Private household profile including optional health sensitivity flags, lifestyle patterns, home ventilation equipment, alert preferences, and explicit privacy consent.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the household owner."
+        },
+        "displayLabel": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Optional non-PII household nickname (e.g., 'Sharma Home')."
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Primary city or neighborhood name."
+        },
+        "latitude": {
+          "type": "number",
+          "description": "Saved latitude coordinate."
+        },
+        "longitude": {
+          "type": "number",
+          "description": "Saved longitude coordinate."
+        },
+        "language": {
+          "type": "string",
+          "enum": ["en", "hi"],
+          "description": "Preferred UI and AI response language."
+        },
+        "hasChildren": {
+          "type": "boolean"
+        },
+        "hasElderly": {
+          "type": "boolean"
+        },
+        "hasPregnant": {
+          "type": "boolean"
+        },
+        "hasAsthmaOrRespiratory": {
+          "type": "boolean"
+        },
+        "hasHeartCondition": {
+          "type": "boolean"
+        },
+        "commuteMode": {
+          "type": "string",
+          "enum": ["walk", "bike", "two_wheeler", "car", "public_transport", "wfh"]
+        },
+        "workFromHome": {
+          "type": "boolean"
+        },
+        "schoolGoingKids": {
+          "type": "boolean"
+        },
+        "outdoorExercise": {
+          "type": "string",
+          "enum": ["none", "morning", "evening", "flexible"]
+        },
+        "hasAirPurifier": {
+          "type": "boolean"
+        },
+        "maskTypes": {
+          "type": "array",
+          "description": "Owned mask types (bounded to 5 items)."
+        },
+        "ventilationType": {
+          "type": "string",
+          "enum": ["sealed_ac", "standard_windows", "cross_ventilated", "balcony_open"]
+        },
+        "cookingFuel": {
+          "type": "string",
+          "enum": ["lpg", "png_piped", "induction_electric", "biomass_solid"]
+        },
+        "hasIndoorPlants": {
+          "type": "boolean"
+        },
+        "budgetLevel": {
+          "type": "string",
+          "enum": ["low", "medium", "flexible"]
+        },
+        "alertAqiThreshold": {
+          "type": "number",
+          "description": "Personal AQI threshold for alerts (50 to 400)."
+        },
+        "healthConsentAccepted": {
+          "type": "boolean",
+          "description": "Explicit user consent for storing optional health sensitivity flags."
+        },
+        "communityGroupId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "city",
+        "language",
+        "hasChildren",
+        "hasElderly",
+        "hasPregnant",
+        "hasAsthmaOrRespiratory",
+        "hasHeartCondition",
+        "commuteMode",
+        "workFromHome",
+        "schoolGoingKids",
+        "outdoorExercise",
+        "hasAirPurifier",
+        "maskTypes",
+        "ventilationType",
+        "cookingFuel",
+        "hasIndoorPlants",
+        "budgetLevel",
+        "alertAqiThreshold",
+        "healthConsentAccepted",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ActionLog": {
+      "title": "ActionLog",
+      "description": "Completed clean-air protection or low-emission habit logged by a household.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "actionId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "category": {
+          "type": "string",
+          "enum": ["protection", "indoor", "transport", "community"]
+        },
+        "pm25AvoidedUg": {
+          "type": "number"
+        },
+        "co2SavedKg": {
+          "type": "number"
+        },
+        "pmSavedGrams": {
+          "type": "number"
+        },
+        "dateKey": {
+          "type": "string",
+          "maxLength": 10,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "actionId",
+        "label",
+        "category",
+        "pm25AvoidedUg",
+        "co2SavedKg",
+        "pmSavedGrams",
+        "dateKey",
+        "createdAt"
+      ]
+    },
+    "CommunityGroup": {
+      "title": "CommunityGroup",
+      "description": "Neighbourhood, RWA, or school clean-air group with aggregated non-PII challenge progress and local tips.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "area": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "groupType": {
+          "type": "string",
+          "enum": ["rwa", "school", "neighbourhood"]
+        },
+        "challengeTitle": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "challengeTargetActions": {
+          "type": "number"
+        },
+        "tips": {
+          "type": "array",
+          "description": "Aggregated community clean-air tips (max 10)."
+        },
+        "createdBy": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "name",
+        "city",
+        "area",
+        "groupType",
+        "challengeTitle",
+        "challengeTargetActions",
+        "tips",
+        "createdBy",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CommunityContribution": {
+      "title": "CommunityContribution",
+      "description": "Privacy-preserving anonymized household leaderboard row for a community group. Contains zero PII.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "groupId": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "alias": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "weeklyActions": {
+          "type": "number"
+        },
+        "weeklyCo2SavedKg": {
+          "type": "number"
+        },
+        "weeklyExposureAvoidedUg": {
+          "type": "number"
+        },
+        "streakDays": {
+          "type": "number"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "groupId",
+        "alias",
+        "weeklyActions",
+        "weeklyCo2SavedKg",
+        "weeklyExposureAvoidedUg",
+        "streakDays",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/households/{userId}": {
+      "schema": { "$ref": "#/entities/HouseholdProfile" },
+      "description": "Private household profile document keyed by Firebase Auth UID. Owner-only read/write/delete."
+    },
+    "/households/{userId}/actionLogs/{logId}": {
+      "schema": { "$ref": "#/entities/ActionLog" },
+      "description": "Private clean-air action logs owned strictly by userId."
+    },
+    "/communityGroups/{groupId}": {
+      "schema": { "$ref": "#/entities/CommunityGroup" },
+      "description": "Neighbourhood/school/RWA clean-air group metadata and aggregated tips. No PII."
+    },
+    "/communityGroups/{groupId}/contributions/{userId}": {
+      "schema": { "$ref": "#/entities/CommunityContribution" },
+      "description": "Anonymized household leaderboard entry for a community group. Owner writes own entry; no PII stored."
+    }
+  }
+}

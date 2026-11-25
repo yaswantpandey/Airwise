@@ -1,0 +1,275 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Primitives ---
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function isValidMaskArray(arr) {
+      return arr is list
+        && arr.size() <= 5
+        && arr.hasOnly(['none', 'cloth', 'surgical', 'n95', 'n99', 'kn95']);
+    }
+
+    function isValidTipsArray(arr) {
+      return arr is list
+        && arr.size() <= 10
+        && (arr.size() == 0 || (arr[0] is string && arr[0].size() >= 4 && arr[0].size() <= 200));
+    }
+
+    // --- Validation Blueprints (Anti-Update-Gap) ---
+    function isValidHousehold(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'city', 'language',
+          'hasChildren', 'hasElderly', 'hasPregnant',
+          'hasAsthmaOrRespiratory', 'hasHeartCondition',
+          'commuteMode', 'workFromHome', 'schoolGoingKids', 'outdoorExercise',
+          'hasAirPurifier', 'maskTypes', 'ventilationType', 'cookingFuel',
+          'hasIndoorPlants', 'budgetLevel', 'alertAqiThreshold',
+          'healthConsentAccepted', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'displayLabel', 'city', 'latitude', 'longitude', 'language',
+          'hasChildren', 'hasElderly', 'hasPregnant',
+          'hasAsthmaOrRespiratory', 'hasHeartCondition',
+          'commuteMode', 'workFromHome', 'schoolGoingKids', 'outdoorExercise',
+          'hasAirPurifier', 'maskTypes', 'ventilationType', 'cookingFuel',
+          'hasIndoorPlants', 'budgetLevel', 'alertAqiThreshold',
+          'healthConsentAccepted', 'communityGroupId', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && (!('displayLabel' in data) || (data.displayLabel is string && data.displayLabel.size() <= 60))
+        && data.city is string && data.city.size() >= 1 && data.city.size() <= 80
+        && (!('latitude' in data) || (data.latitude is number && data.latitude >= -90 && data.latitude <= 90))
+        && (!('longitude' in data) || (data.longitude is number && data.longitude >= -180 && data.longitude <= 180))
+        && data.language in ['en', 'hi']
+        && data.hasChildren is bool
+        && data.hasElderly is bool
+        && data.hasPregnant is bool
+        && data.hasAsthmaOrRespiratory is bool
+        && data.hasHeartCondition is bool
+        && data.commuteMode in ['walk', 'bike', 'two_wheeler', 'car', 'public_transport', 'wfh']
+        && data.workFromHome is bool
+        && data.schoolGoingKids is bool
+        && data.outdoorExercise in ['none', 'morning', 'evening', 'flexible']
+        && data.hasAirPurifier is bool
+        && isValidMaskArray(data.maskTypes)
+        && data.ventilationType in ['sealed_ac', 'standard_windows', 'cross_ventilated', 'balcony_open']
+        && data.cookingFuel in ['lpg', 'png_piped', 'induction_electric', 'biomass_solid']
+        && data.hasIndoorPlants is bool
+        && data.budgetLevel in ['low', 'medium', 'flexible']
+        && data.alertAqiThreshold is number && data.alertAqiThreshold >= 50 && data.alertAqiThreshold <= 400
+        && data.healthConsentAccepted is bool
+        && (!('communityGroupId' in data) || (isValidId(data.communityGroupId) && data.communityGroupId.size() <= 64))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidActionLog(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'actionId', 'label', 'category',
+          'pm25AvoidedUg', 'co2SavedKg', 'pmSavedGrams',
+          'dateKey', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'actionId', 'label', 'category',
+          'pm25AvoidedUg', 'co2SavedKg', 'pmSavedGrams',
+          'dateKey', 'createdAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.actionId) && data.actionId.size() <= 64
+        && data.label is string && data.label.size() >= 2 && data.label.size() <= 120
+        && data.category in ['protection', 'indoor', 'transport', 'community']
+        && data.pm25AvoidedUg is number && data.pm25AvoidedUg >= 0 && data.pm25AvoidedUg <= 5000
+        && data.co2SavedKg is number && data.co2SavedKg >= 0 && data.co2SavedKg <= 100
+        && data.pmSavedGrams is number && data.pmSavedGrams >= 0 && data.pmSavedGrams <= 500
+        && data.dateKey is string && data.dateKey.size() == 10 && data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && data.createdAt is timestamp;
+    }
+
+    function isValidCommunityGroup(data) {
+      return data.keys().hasAll([
+          'name', 'city', 'area', 'groupType',
+          'challengeTitle', 'challengeTargetActions', 'tips',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'name', 'city', 'area', 'groupType',
+          'challengeTitle', 'challengeTargetActions', 'tips',
+          'createdBy', 'createdAt', 'updatedAt'
+        ])
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
+        && data.city is string && data.city.size() >= 2 && data.city.size() <= 60
+        && data.area is string && data.area.size() >= 2 && data.area.size() <= 80
+        && data.groupType in ['rwa', 'school', 'neighbourhood']
+        && data.challengeTitle is string && data.challengeTitle.size() >= 4 && data.challengeTitle.size() <= 120
+        && data.challengeTargetActions is number && data.challengeTargetActions >= 10 && data.challengeTargetActions <= 100000
+        && isValidTipsArray(data.tips)
+        && isValidId(data.createdBy)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidContribution(data, groupId, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'groupId', 'alias',
+          'weeklyActions', 'weeklyCo2SavedKg', 'weeklyExposureAvoidedUg',
+          'streakDays', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'groupId', 'alias',
+          'weeklyActions', 'weeklyCo2SavedKg', 'weeklyExposureAvoidedUg',
+          'streakDays', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.ownerId)
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && isValidId(data.groupId)
+        && data.groupId == groupId
+        && data.alias is string && data.alias.size() >= 2 && data.alias.size() <= 40
+        && data.weeklyActions is number && data.weeklyActions >= 0 && data.weeklyActions <= 500
+        && data.weeklyCo2SavedKg is number && data.weeklyCo2SavedKg >= 0 && data.weeklyCo2SavedKg <= 500
+        && data.weeklyExposureAvoidedUg is number && data.weeklyExposureAvoidedUg >= 0 && data.weeklyExposureAvoidedUg <= 50000
+        && data.streakDays is number && data.streakDays >= 0 && data.streakDays <= 365
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // --- Collection 1: Private Household Profiles (Strict PII / Health Isolation) ---
+    match /households/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId)
+        && isOwner(userId)
+        && isValidHousehold(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId)
+        && isOwner(userId)
+        && isValidHousehold(incoming(), userId)
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayLabel', 'city', 'latitude', 'longitude', 'language',
+          'hasChildren', 'hasElderly', 'hasPregnant',
+          'hasAsthmaOrRespiratory', 'hasHeartCondition',
+          'commuteMode', 'workFromHome', 'schoolGoingKids', 'outdoorExercise',
+          'hasAirPurifier', 'maskTypes', 'ventilationType', 'cookingFuel',
+          'hasIndoorPlants', 'budgetLevel', 'alertAqiThreshold',
+          'healthConsentAccepted', 'communityGroupId', 'updatedAt'
+        ]);
+
+      allow delete: if isValidId(userId) && isOwner(userId);
+
+      // --- Subcollection: Household Action Logs ---
+      match /actionLogs/{logId} {
+        allow get: if isValidId(userId) && isValidId(logId) && isOwner(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && resource.data.ownerId == request.auth.uid;
+
+        allow create: if isValidId(userId)
+          && isValidId(logId)
+          && isOwner(userId)
+          && isValidActionLog(incoming(), userId)
+          && incoming().createdAt == request.time
+          && exists(/databases/$(database)/documents/households/$(userId));
+
+        allow update: if false;
+        allow delete: if isValidId(userId) && isValidId(logId) && isOwner(userId);
+      }
+    }
+
+    // --- Collection 2: Community Clean-Air Groups (Zero PII) ---
+    match /communityGroups/{groupId} {
+      allow get: if isValidId(groupId) && isSignedIn();
+      allow list: if isSignedIn() && resource.data.groupType in ['rwa', 'school', 'neighbourhood'];
+
+      allow create: if isValidId(groupId)
+        && isVerified()
+        && isValidCommunityGroup(incoming())
+        && incoming().createdBy == request.auth.uid
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isValidId(groupId)
+        && isVerified()
+        && isValidCommunityGroup(incoming())
+        && existing().createdBy == request.auth.uid
+        && incoming().createdBy == existing().createdBy
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'tips', 'challengeTitle', 'challengeTargetActions', 'updatedAt'
+        ]);
+
+      allow delete: if false;
+
+      // --- Subcollection: Anonymized Leaderboard Contributions ---
+      match /contributions/{userId} {
+        allow get: if isValidId(groupId) && isValidId(userId) && isSignedIn();
+        allow list: if isValidId(groupId)
+          && isSignedIn()
+          && resource.data.groupId == groupId;
+
+        allow create: if isValidId(groupId)
+          && isValidId(userId)
+          && isOwner(userId)
+          && isValidContribution(incoming(), groupId, userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/communityGroups/$(groupId));
+
+        allow update: if isValidId(groupId)
+          && isValidId(userId)
+          && isOwner(userId)
+          && isValidContribution(incoming(), groupId, userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().groupId == existing().groupId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'alias', 'weeklyActions', 'weeklyCo2SavedKg',
+            'weeklyExposureAvoidedUg', 'streakDays', 'updatedAt'
+          ])
+          && exists(/databases/$(database)/documents/communityGroups/$(groupId));
+
+        allow delete: if isValidId(groupId) && isValidId(userId) && isOwner(userId);
+      }
+    }
+  }
+}
