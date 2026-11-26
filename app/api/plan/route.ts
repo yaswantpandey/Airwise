@@ -1,124 +1,87 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
-import { buildRuleBasedDailyPlan, findBestOutdoorWindows } from '@/lib/air-quality';
+import { NextRequest } from 'next/server';
+import { findBestOutdoorWindows, sanitizeUserText } from '@/lib/air-quality';
+import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
+import { hashCachePayload, LruCache } from '@/lib/server/cache';
+import { serverConfig } from '@/lib/server/config';
+import { buildRuleBasedDailyPlan } from '@/lib/server/fallbacks';
+import { callGeminiJsonWithFallback } from '@/lib/server/gemini';
 import {
-  AIRWISE_GEMINI_MODEL,
+  createRequestId,
+  handleCorsPreflight,
+  isOriginAllowed,
+  jsonError,
+  jsonOk,
+  readJsonBodyWithLimit,
+} from '@/lib/server/http';
+import {
+  buildDailyPlanPrompt,
   DAILY_PLAN_RESPONSE_SCHEMA,
   DAILY_PLAN_SYSTEM_PROMPT,
   DailyPlanOutputZod,
-  getGeminiClient,
-} from '@/lib/genai-prompts';
-import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
+} from '@/lib/server/prompts';
+import { planRequestSchema } from '@/lib/server/schemas';
 import type { AirQualitySnapshot, DailyPlanResponse, HouseholdProfile } from '@/lib/types';
 
-const planRequestSchema = z.object({
-  language: z.enum(['en', 'hi']).default('en'),
-  snapshot: z.object({
-    locationName: z.string().min(1).max(100),
-    region: z.string().max(100).default(''),
-    country: z.string().max(100).default(''),
-    latitude: z.number(),
-    longitude: z.number(),
-    observedAtIso: z.string(),
-    source: z.enum(['open-meteo-live', 'demo-seed']),
-    aqi: z.number().min(0).max(999),
-    pm25: z.number().min(0).max(2000),
-    pm10: z.number().min(0).max(3000),
-    no2: z.number().min(0).max(1000),
-    o3: z.number().min(0).max(1000),
-    co: z.number().min(0).max(100),
-    temperatureC: z.number().min(-50).max(60),
-    humidityPct: z.number().min(0).max(100),
-    windKmh: z.number().min(0).max(200),
-    inversionRisk: z.enum(['low', 'moderate', 'high']),
-    hourly: z
-      .array(
-        z.object({
-          timeIso: z.string(),
-          hourLabel: z.string(),
-          aqi: z.number(),
-          pm25: z.number(),
-          pm10: z.number(),
-          temperatureC: z.number(),
-          humidityPct: z.number(),
-          windKmh: z.number(),
-        })
-      )
-      .max(48),
-  }),
-  profile: z.object({
-    displayLabel: z.string().max(60),
-    city: z.string().max(80),
-    language: z.enum(['en', 'hi']),
-    hasChildren: z.boolean(),
-    hasElderly: z.boolean(),
-    hasPregnant: z.boolean(),
-    hasAsthmaOrRespiratory: z.boolean(),
-    hasHeartCondition: z.boolean(),
-    commuteMode: z.enum(['walk', 'bike', 'two_wheeler', 'car', 'public_transport', 'wfh']),
-    workFromHome: z.boolean(),
-    schoolGoingKids: z.boolean(),
-    outdoorExercise: z.enum(['none', 'morning', 'evening', 'flexible']),
-    hasAirPurifier: z.boolean(),
-    maskTypes: z.array(z.enum(['none', 'cloth', 'surgical', 'n95', 'n99', 'kn95'])).max(6),
-    ventilationType: z.enum(['sealed_ac', 'standard_windows', 'cross_ventilated', 'balcony_open']),
-    cookingFuel: z.enum(['lpg', 'png_piped', 'induction_electric', 'biomass_solid']),
-    hasIndoorPlants: z.boolean(),
-    budgetLevel: z.enum(['low', 'medium', 'flexible']),
-    alertAqiThreshold: z.number().min(50).max(400),
-    healthConsentAccepted: z.boolean(),
-    communityGroupId: z.string().max(64),
-  }),
-});
+const planCache = new LruCache<DailyPlanResponse>(
+  serverConfig.cache.planMaxEntries,
+  serverConfig.cache.planTtlMs
+);
+
+export async function OPTIONS(request: NextRequest) {
+  return handleCorsPreflight(request);
+}
 
 export async function POST(request: NextRequest) {
+  const requestId = createRequestId();
+
+  if (!isOriginAllowed(request)) {
+    return jsonError(request, 403, 'Origin not allowed.', requestId);
+  }
+
   const ip = getClientIp(request);
-  const rl = checkRateLimit(`plan:${ip}`, 15, 60_000);
+  const { limit, windowMs } = serverConfig.rateLimits.plan;
+  const rl = checkRateLimit(`plan:${ip}`, limit, windowMs);
   if (!rl.allowed) {
-    return NextResponse.json(
-      { error: 'Rate limit reached for AI plan generation. Please retry in a minute.' },
-      { status: 429 }
+    return jsonError(
+      request,
+      429,
+      'Rate limit reached for AI plan generation. Please retry in a minute.',
+      requestId,
+      {
+        'X-RateLimit-Remaining': '0',
+        'Retry-After': '60',
+      }
     );
   }
 
-  let body: unknown;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON request body.' }, { status: 400 });
+  const bodyResult = await readJsonBodyWithLimit(request);
+  if (!bodyResult.ok) {
+    return jsonError(request, bodyResult.status, bodyResult.message, requestId);
   }
 
-  const parsed = planRequestSchema.safeParse(body);
+  const parsed = planRequestSchema.safeParse(bodyResult.data);
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: 'Request failed schema validation.', details: parsed.error.flatten() },
-      { status: 400 }
-    );
+    return jsonError(request, 400, 'Invalid daily plan request payload.', requestId);
   }
 
   const { snapshot, profile, language } = parsed.data;
-  const typedSnapshot = snapshot as AirQualitySnapshot;
-  const typedProfile = profile as HouseholdProfile;
+  const sanitizedLocation = sanitizeUserText(snapshot.locationName, 80) || 'Your City';
+  const typedSnapshot: AirQualitySnapshot = {
+    ...snapshot,
+    locationName: sanitizedLocation,
+    region: sanitizeUserText(snapshot.region, 80),
+    country: sanitizeUserText(snapshot.country, 80),
+  };
+  const typedProfile: HouseholdProfile = {
+    ...profile,
+    displayLabel: sanitizeUserText(profile.displayLabel, 60),
+    city: sanitizeUserText(profile.city, 80),
+  };
+
   const windows = findBestOutdoorWindows(typedSnapshot.hourly);
 
-  const ai = getGeminiClient();
-  if (!ai) {
-    const fallback = buildRuleBasedDailyPlan(
-      typedSnapshot,
-      typedProfile,
-      language,
-      language === 'hi'
-        ? 'लाइव Gemini AI कुंजी उपलब्ध नहीं है — वर्तमान AQI बैंड और परिवार प्रोफ़ाइल पर आधारित पारदर्शी नियम-आधारित योजना दिखाई जा रही है।'
-        : 'Live Gemini AI key is not configured — displaying transparent rule-based guidance grounded in your current AQI band and household profile.'
-    );
-    return NextResponse.json(fallback, {
-      headers: { 'X-AirWise-Plan-Source': 'rule-fallback' },
-    });
-  }
-
-  const contextPayload = {
+  const normalizedContext = {
     requestedLanguage: language,
-    currentLocalTimeIso: new Date().toISOString(),
     airQuality: {
       location: typedSnapshot.locationName,
       aqi: typedSnapshot.aqi,
@@ -145,7 +108,7 @@ export async function POST(request: NextRequest) {
       schoolGoingKids: typedProfile.schoolGoingKids,
       outdoorExercise: typedProfile.outdoorExercise,
       hasAirPurifier: typedProfile.hasAirPurifier,
-      maskTypesOwned: typedProfile.maskTypes,
+      maskTypesOwned: [...typedProfile.maskTypes].sort(),
       ventilationType: typedProfile.ventilationType,
       cookingFuel: typedProfile.cookingFuel,
       hasIndoorPlants: typedProfile.hasIndoorPlants,
@@ -153,47 +116,56 @@ export async function POST(request: NextRequest) {
     },
   };
 
-  try {
-    const response = await ai.models.generateContent({
-      model: AIRWISE_GEMINI_MODEL,
-      contents: `Generate a structured, personalized AirWise daily plan strictly grounded in this JSON context:\n${JSON.stringify(
-        contextPayload
-      )}`,
-      config: {
-        systemInstruction: DAILY_PLAN_SYSTEM_PROMPT,
-        responseMimeType: 'application/json',
-        responseSchema: DAILY_PLAN_RESPONSE_SCHEMA,
-      },
-    });
-
-    const rawText = (response.text ?? '').trim();
-    const jsonData = JSON.parse(rawText);
-    const validated = DailyPlanOutputZod.parse(jsonData);
-
-    const result: DailyPlanResponse = {
-      ...validated,
-      generatedAtIso: new Date().toISOString(),
-      source: 'gemini-ai',
-    };
-
-    return NextResponse.json(result, {
-      headers: {
-        'X-AirWise-Plan-Source': 'gemini-ai',
-        'X-RateLimit-Remaining': String(rl.remaining),
-      },
-    });
-  } catch (err) {
-    console.error('Gemini daily plan failed, serving transparent rule-based fallback:', err);
-    const fallback = buildRuleBasedDailyPlan(
-      typedSnapshot,
-      typedProfile,
-      language,
-      language === 'hi'
-        ? 'लाइव Gemini AI सेवा अस्थायी रूप से अनुपलब्ध है — वर्तमान AQI बैंड पर आधारित पारदर्शी नियम-आधारित योजना दिखाई जा रही है।'
-        : 'Live Gemini AI service was temporarily unreachable — showing transparent rule-based guidance grounded in your current AQI data.'
-    );
-    return NextResponse.json(fallback, {
-      headers: { 'X-AirWise-Plan-Source': 'rule-fallback' },
+  const cacheKey = hashCachePayload(normalizedContext);
+  const cached = planCache.get(cacheKey);
+  if (cached) {
+    return jsonOk(request, cached, requestId, {
+      'X-AirWise-Plan-Source': cached.source,
+      'X-AirWise-Cache': 'HIT',
+      'X-RateLimit-Remaining': String(rl.remaining),
     });
   }
+
+  const promptPayload = {
+    ...normalizedContext,
+    currentLocalTimeIso: new Date().toISOString(),
+  };
+
+  const aiResult = await callGeminiJsonWithFallback({
+    prompt: buildDailyPlanPrompt(promptPayload),
+    systemInstruction: DAILY_PLAN_SYSTEM_PROMPT,
+    responseSchema: DAILY_PLAN_RESPONSE_SCHEMA,
+    zodSchema: DailyPlanOutputZod,
+    requestId,
+    fallback: (reason) => {
+      const notice =
+        reason === 'missing-key'
+          ? language === 'hi'
+            ? 'लाइव Gemini AI कुंजी उपलब्ध नहीं है — वर्तमान AQI बैंड और परिवार प्रोफ़ाइल पर आधारित पारदर्शी नियम-आधारित योजना दिखाई जा रही है।'
+            : 'Live Gemini AI key is not configured — displaying transparent rule-based guidance grounded in your current AQI band and household profile.'
+          : language === 'hi'
+            ? 'लाइव Gemini AI सेवा अस्थायी रूप से अनुपलब्ध है — वर्तमान AQI बैंड पर आधारित पारदर्शी नियम-आधारित योजना दिखाई जा रही है।'
+            : 'Live Gemini AI service was temporarily unreachable — showing transparent rule-based guidance grounded in your current AQI data.';
+      return buildRuleBasedDailyPlan(typedSnapshot, typedProfile, language, notice);
+    },
+  });
+
+  const responsePayload: DailyPlanResponse =
+    aiResult.source === 'gemini-ai'
+      ? {
+          ...aiResult.data,
+          generatedAtIso: new Date().toISOString(),
+          source: 'gemini-ai',
+        }
+      : (aiResult.data as DailyPlanResponse);
+
+  if (aiResult.source === 'gemini-ai') {
+    planCache.set(cacheKey, responsePayload);
+  }
+
+  return jsonOk(request, responsePayload, requestId, {
+    'X-AirWise-Plan-Source': responsePayload.source,
+    'X-AirWise-Cache': 'MISS',
+    'X-RateLimit-Remaining': String(rl.remaining),
+  });
 }

@@ -23,7 +23,7 @@ export class ErrorBoundary extends React.Component<
     };
   }
 
-  render() {
+  override render() {
     if (this.state.hasError) {
       return (
         <div className="mx-auto my-16 max-w-lg rounded-xl border border-rose-200 bg-white p-6 text-slate-900 shadow-xs dark:border-rose-900/60 dark:bg-[#131C26] dark:text-slate-100">

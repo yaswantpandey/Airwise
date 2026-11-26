@@ -1,5 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { z } from 'zod';
+import { NextRequest } from 'next/server';
 import {
   aggregateHourlyToDailyHistory,
   computeInversionRisk,
@@ -7,21 +6,23 @@ import {
 } from '@/lib/air-quality';
 import { checkRateLimit, getClientIp } from '@/lib/rate-limit';
 import { buildSeedHistory7d, buildSeedSnapshot, PRESET_CITIES } from '@/lib/seed-data';
+import { LruCache } from '@/lib/server/cache';
+import { serverConfig } from '@/lib/server/config';
+import {
+  createRequestId,
+  fetchWithTimeout,
+  handleCorsPreflight,
+  isOriginAllowed,
+  jsonError,
+  jsonOk,
+} from '@/lib/server/http';
+import { aqiQuerySchema } from '@/lib/server/schemas';
 import type { AirQualitySnapshot, HourlyForecastPoint } from '@/lib/types';
 
-interface CacheEntry {
-  data: AirQualitySnapshot;
-  expiresAt: number;
-}
-
-const aqiCache = new Map<string, CacheEntry>();
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-const querySchema = z.object({
-  city: z.string().max(80).optional(),
-  lat: z.coerce.number().min(-90).max(90).optional(),
-  lon: z.coerce.number().min(-180).max(180).optional(),
-});
+const aqiCache = new LruCache<AirQualitySnapshot>(
+  serverConfig.cache.aqiMaxEntries,
+  serverConfig.cache.aqiTtlMs
+);
 
 function matchPresetCity(cityName?: string) {
   if (!cityName) return PRESET_CITIES[0];
@@ -37,48 +38,42 @@ function matchPresetCity(cityName?: string) {
   );
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 4500): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
-  } finally {
-    clearTimeout(timer);
-  }
+export async function OPTIONS(request: NextRequest) {
+  return handleCorsPreflight(request);
 }
 
 export async function GET(request: NextRequest) {
+  const requestId = createRequestId();
+
+  if (!isOriginAllowed(request)) {
+    return jsonError(request, 403, 'Origin not allowed.', requestId);
+  }
+
   const ip = getClientIp(request);
-  const rl = checkRateLimit(`aqi:${ip}`, 45, 60_000);
+  const { limit, windowMs } = serverConfig.rateLimits.aqi;
+  const rl = checkRateLimit(`aqi:${ip}`, limit, windowMs);
   if (!rl.allowed) {
-    return NextResponse.json(
-      { error: 'Too many air quality requests. Please wait a minute.' },
+    return jsonError(
+      request,
+      429,
+      'Too many air quality requests. Please wait a minute.',
+      requestId,
       {
-        status: 429,
-        headers: {
-          'X-RateLimit-Remaining': '0',
-          'Retry-After': '60',
-        },
+        'X-RateLimit-Remaining': '0',
+        'Retry-After': '60',
       }
     );
   }
 
   const sp = request.nextUrl.searchParams;
-  const parsed = querySchema.safeParse({
+  const parsed = aqiQuerySchema.safeParse({
     city: sp.get('city') ?? undefined,
     lat: sp.get('lat') ?? undefined,
     lon: sp.get('lon') ?? undefined,
   });
 
   if (!parsed.success) {
-    return NextResponse.json(
-      { error: 'Invalid location query parameters.' },
-      { status: 400 }
-    );
+    return jsonError(request, 400, 'Invalid location query parameters.', requestId);
   }
 
   const cleanCity = parsed.data.city ? sanitizeUserText(parsed.data.city, 80) : undefined;
@@ -94,18 +89,15 @@ export async function GET(request: NextRequest) {
       : `city:${locationName.toLowerCase()}`;
 
   const cached = aqiCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return NextResponse.json(cached.data, {
-      headers: {
-        'Cache-Control': 'public, max-age=300',
-        'X-AirWise-Cache': 'HIT',
-        'X-RateLimit-Remaining': String(rl.remaining),
-      },
+  if (cached) {
+    return jsonOk(request, cached, requestId, {
+      'Cache-Control': 'public, max-age=300',
+      'X-AirWise-Cache': 'HIT',
+      'X-RateLimit-Remaining': String(rl.remaining),
     });
   }
 
   try {
-    // 1. Geocode if only city name provided
     if (lat === undefined || lon === undefined) {
       const preset = PRESET_CITIES.find(
         (c) => c.name.toLowerCase() === locationName.toLowerCase()
@@ -120,16 +112,24 @@ export async function GET(request: NextRequest) {
         const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
           locationName
         )}&count=1&language=en&format=json`;
-        const geoRes = await fetchWithTimeout(geoUrl, 4000);
+        const geoRes = await fetchWithTimeout(geoUrl, serverConfig.upstreamTimeoutMs);
         if (geoRes.ok) {
-          const geoJson = await geoRes.json();
+          const geoJson = (await geoRes.json()) as {
+            results?: Array<{
+              latitude?: number;
+              longitude?: number;
+              name?: string;
+              admin1?: string;
+              country?: string;
+            }>;
+          };
           const first = geoJson?.results?.[0];
-          if (first) {
+          if (first && Number.isFinite(Number(first.latitude)) && Number.isFinite(Number(first.longitude))) {
             lat = Number(first.latitude);
             lon = Number(first.longitude);
-            locationName = String(first.name);
-            region = String(first.admin1 || '');
-            country = String(first.country || '');
+            locationName = sanitizeUserText(String(first.name ?? locationName), 80) || locationName;
+            region = sanitizeUserText(String(first.admin1 || ''), 80);
+            country = sanitizeUserText(String(first.country || ''), 80);
           }
         }
       }
@@ -141,26 +141,32 @@ export async function GET(request: NextRequest) {
 
     if (lat === undefined || lon === undefined) {
       const fallback = buildSeedSnapshot(matchPresetCity(cleanCity));
-      return NextResponse.json(fallback, {
-        headers: { 'X-AirWise-Source': 'demo-seed' },
+      return jsonOk(request, fallback, requestId, {
+        'X-AirWise-Source': 'demo-seed',
+        'X-RateLimit-Remaining': String(rl.remaining),
       });
     }
 
-    // 2. Fetch live Open-Meteo Air Quality (past 7 days + next 2 days) & Weather forecasts in parallel
     const aqUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&current=us_aqi,pm2_5,pm10,nitrogen_dioxide,ozone,carbon_monoxide&hourly=us_aqi,pm2_5,pm10&past_days=7&forecast_days=2&timezone=auto`;
     const wxUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m&forecast_days=2&timezone=auto`;
 
     const [aqRes, wxRes] = await Promise.all([
-      fetchWithTimeout(aqUrl, 4500),
-      fetchWithTimeout(wxUrl, 4500),
+      fetchWithTimeout(aqUrl, serverConfig.upstreamTimeoutMs),
+      fetchWithTimeout(wxUrl, serverConfig.upstreamTimeoutMs),
     ]);
 
     if (!aqRes.ok || !wxRes.ok) {
       throw new Error(`Open-Meteo HTTP error (${aqRes.status}/${wxRes.status})`);
     }
 
-    const aqJson = await aqRes.json();
-    const wxJson = await wxRes.json();
+    const aqJson = (await aqRes.json()) as {
+      current?: Record<string, unknown>;
+      hourly?: Record<string, unknown>;
+    };
+    const wxJson = (await wxRes.json()) as {
+      current?: Record<string, unknown>;
+      hourly?: Record<string, unknown>;
+    };
 
     const curAq = aqJson?.current ?? {};
     const curWx = wxJson?.current ?? {};
@@ -170,28 +176,37 @@ export async function GET(request: NextRequest) {
     const pm10 = Math.round(Number(curAq.pm10 ?? 0) * 10) / 10;
     const no2 = Math.round(Number(curAq.nitrogen_dioxide ?? 0) * 10) / 10;
     const o3 = Math.round(Number(curAq.ozone ?? 0) * 10) / 10;
-    // Open-Meteo CO is in µg/m³ -> convert to mg/m³ for readability
     const coMg = Math.round((Number(curAq.carbon_monoxide ?? 0) / 1000) * 100) / 100;
 
     const temperatureC = Math.round(Number(curWx.temperature_2m ?? 20) * 10) / 10;
     const humidityPct = Math.round(Number(curWx.relative_humidity_2m ?? 50));
     const windKmh = Math.round(Number(curWx.wind_speed_10m ?? 8) * 10) / 10;
 
-    const times: string[] = Array.isArray(aqJson?.hourly?.time) ? aqJson.hourly.time : [];
-    const hAqi: number[] = Array.isArray(aqJson?.hourly?.us_aqi) ? aqJson.hourly.us_aqi : [];
-    const hPm25: number[] = Array.isArray(aqJson?.hourly?.pm2_5) ? aqJson.hourly.pm2_5 : [];
-    const hPm10: number[] = Array.isArray(aqJson?.hourly?.pm10) ? aqJson.hourly.pm10 : [];
+    const times: string[] = Array.isArray(aqJson?.hourly?.time)
+      ? (aqJson.hourly.time as string[])
+      : [];
+    const hAqi: number[] = Array.isArray(aqJson?.hourly?.us_aqi)
+      ? (aqJson.hourly.us_aqi as number[])
+      : [];
+    const hPm25: number[] = Array.isArray(aqJson?.hourly?.pm2_5)
+      ? (aqJson.hourly.pm2_5 as number[])
+      : [];
+    const hPm10: number[] = Array.isArray(aqJson?.hourly?.pm10)
+      ? (aqJson.hourly.pm10 as number[])
+      : [];
     const hTemp: number[] = Array.isArray(wxJson?.hourly?.temperature_2m)
-      ? wxJson.hourly.temperature_2m
+      ? (wxJson.hourly.temperature_2m as number[])
       : [];
     const hHum: number[] = Array.isArray(wxJson?.hourly?.relative_humidity_2m)
-      ? wxJson.hourly.relative_humidity_2m
+      ? (wxJson.hourly.relative_humidity_2m as number[])
       : [];
     const hWind: number[] = Array.isArray(wxJson?.hourly?.wind_speed_10m)
-      ? wxJson.hourly.wind_speed_10m
+      ? (wxJson.hourly.wind_speed_10m as number[])
       : [];
 
-    const wxTimes: string[] = Array.isArray(wxJson?.hourly?.time) ? wxJson.hourly.time : [];
+    const wxTimes: string[] = Array.isArray(wxJson?.hourly?.time)
+      ? (wxJson.hourly.time as string[])
+      : [];
     const wxIndexByTime = new Map<string, number>();
     for (let i = 0; i < wxTimes.length; i++) {
       wxIndexByTime.set(wxTimes[i], i);
@@ -253,23 +268,19 @@ export async function GET(request: NextRequest) {
       history7d,
     };
 
-    aqiCache.set(cacheKey, { data: snapshot, expiresAt: Date.now() + CACHE_TTL_MS });
+    aqiCache.set(cacheKey, snapshot);
 
-    return NextResponse.json(snapshot, {
-      headers: {
-        'Cache-Control': 'public, max-age=300',
-        'X-AirWise-Cache': 'MISS',
-        'X-RateLimit-Remaining': String(rl.remaining),
-      },
+    return jsonOk(request, snapshot, requestId, {
+      'Cache-Control': 'public, max-age=300',
+      'X-AirWise-Cache': 'MISS',
+      'X-RateLimit-Remaining': String(rl.remaining),
     });
   } catch (err) {
-    console.warn('Open-Meteo unavailable, using deterministic winter smog seed:', err);
+    console.warn(`[AirWise][${requestId}] Open-Meteo unavailable, using deterministic seed:`, err);
     const seed = buildSeedSnapshot(matchPresetCity(cleanCity));
-    return NextResponse.json(seed, {
-      headers: {
-        'X-AirWise-Source': 'demo-seed',
-        'X-RateLimit-Remaining': String(rl.remaining),
-      },
+    return jsonOk(request, seed, requestId, {
+      'X-AirWise-Source': 'demo-seed',
+      'X-RateLimit-Remaining': String(rl.remaining),
     });
   }
 }
